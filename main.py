@@ -5,11 +5,14 @@ from deepface import DeepFace
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import logging.config
 import mediapipe as mp
 import uvicorn
 from collections import defaultdict
 from datetime import datetime
 import csv
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 app = FastAPI()
 
@@ -44,16 +47,45 @@ emotion_weights = {
 # CSV file path for storing face logs
 csv_file_path = "face_data.csv"
 
-
-# inilialzing services like logging only once
+# Initialize the logging system
 def setup_logging():
-    logging.basicConfig(
-        level=logging.INFO,
-        filename="app_logs.log",
-        filemode="a",
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
+    logging_config = {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'formatters': {
+            'standard': {
+                'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            },
+        },
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+                'formatter': 'standard',
+                'level': 'INFO',
+            },
+            'file_handler': {
+                'class': 'logging.handlers.RotatingFileHandler',
+                'formatter': 'standard',
+                'level': 'INFO',
+                'filename': 'app_logs.log',
+                'maxBytes': 10485760,  # 10MB
+                'backupCount': 5,
+                'encoding': 'utf8',
+            },
+        },
+        'loggers': {
+            '': {
+                'handlers': ['console', 'file_handler'],
+                'level': 'INFO',
+                'propagate': True
+            }
+        }
+    }
 
+    logging.config.dictConfig(logging_config)
+
+# Create a logger for this module
+logger = logging.getLogger(__name__)
 
 def get_face_cascade():
     global face_cascade
@@ -64,7 +96,6 @@ def get_face_cascade():
         )
     return face_cascade
 
-
 def get_segmentor():
     global segmentor
     if segmentor is None:
@@ -72,7 +103,6 @@ def get_segmentor():
         mp_selfie_segmentation = mp.solutions.selfie_segmentation
         segmentor = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
     return segmentor
-
 
 # Initialize the CSV file by writing the headers if the file doesn't exist
 def init_csv():
@@ -93,10 +123,9 @@ def init_csv():
                     "productivity",
                 ]
             )
-        logging.info("CSV file initialized successfully.")
+        logger.info("CSV file initialized successfully.")
     except Exception as e:
-        logging.error(f"Error initializing the CSV file: {e}")
-
+        logger.error(f"Error initializing the CSV file: {e}")
 
 # Function to insert face data into the CSV file
 def insert_face_log(face_id, time_in, time_out, duration, emotions, productivity):
@@ -106,20 +135,18 @@ def insert_face_log(face_id, time_in, time_out, duration, emotions, productivity
             writer.writerow(
                 [time_in, time_out, face_id, duration, ",".join(emotions), productivity]
             )
-        logging.info(f"Inserted face data for Face ID {face_id} into CSV file.")
+        logger.info(f"Inserted face data for Face ID {face_id} into CSV file.")
     except Exception as e:
-        logging.error(f"Error inserting face data into CSV: {e}")
-
+        logger.error(f"Error inserting face data into CSV: {e}")
 
 def insert_face_emotion(currTime, faceId, detectedEmotion):
     try:
         with open(csv_file_path, mode="a", newline="") as file:
             writer = csv.writer(file)
             writer.writerow([currTime, faceId, detectedEmotion])
-        print(f"wrote csv for {faceId}{currTime}")
+        logger.info(f"Logged emotion for Face ID {faceId} at {currTime}: {detectedEmotion}")
     except Exception as e:
-        print(f"error inserting record in csv {e}")
-
+        logger.exception("Error inserting record into CSV.")
 
 # Analyze face for emotion using DeepFace
 def analyze_face(face_roi):
@@ -132,9 +159,8 @@ def analyze_face(face_roi):
         emotion = result.get("dominant_emotion")
         return emotion
     except Exception as e:
-        logging.error(f"Error analyzing face: {e}")
+        logger.error(f"Error analyzing face: {e}")
         return None
-
 
 # Function to calculate productivity based on emotions
 def calculate_productivity(emotions):
@@ -144,7 +170,6 @@ def calculate_productivity(emotions):
     return max(
         0, min(100, (weighted_sum / len(emotions)) * 100)
     )  # Clamp between 0 and 100
-
 
 # Function to match or assign a new face ID using DeepFace embeddings
 def get_or_assign_face_id(face_roi):
@@ -179,9 +204,8 @@ def get_or_assign_face_id(face_roi):
 
         return maxKey + 1
     except Exception as e:
-        logging.error(f"Error extracting face embedding: {e}")
-        print("error ", e)
-
+        logger.error(f"Error extracting face embedding: {e}")
+        return None
 
 def is_base64(s: str) -> bool:
     try:
@@ -190,30 +214,28 @@ def is_base64(s: str) -> bool:
     except Exception:
         return False
 
-
 face_ids = {}  # Dictionary to store face embeddings and face IDs
 face_data = defaultdict(lambda: {"time_in": None, "time_out": None, "emotions": []})
-
 
 # Function to continuously capture frames from the camera
 def capture_and_process_video(imageString: str) -> None:
     global face_ids, face_data
     detected_face_ids = set()
 
-    # ret, frame = camera.read()  # Read a frame from the webcam
     isValidBaseString = is_base64(imageString)
 
     if not isValidBaseString:
-        print("INVALID BASE64 STRING PROVIDED")
-        logging.error("Failed to capture frame from webcam")
+        logger.error("Invalid base64 string provided.")
         return
 
-    # converting base64 string in np array
-    image_data = base64.b64decode(imageString)
-
-    np_array = np.frombuffer(image_data, np.uint8)
-
-    image = cv2.imdecode(np_array, cv2.IMREAD_COLOR)  # Read as a color image (BGR)
+    # Converting base64 string to np array
+    try:
+        image_data = base64.b64decode(imageString)
+        np_array = np.frombuffer(image_data, np.uint8)
+        image = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+    except Exception as e:
+        logger.exception("Error decoding image from base64 string.")
+        return
 
     gray_frame = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -222,15 +244,13 @@ def capture_and_process_video(imageString: str) -> None:
         gray_frame, scaleFactor=1.2, minNeighbors=5, minSize=(30, 30)
     )
 
-    print("faces found in image", len(faces))
+    logger.info(f"Faces found in image: {len(faces)}")
 
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Track the faces detected in this frame
-
-    # If faces are found, process each face
+    # Process each detected face
     for x, y, w, h in faces:
-        face_roi = image[y : y + h, x : x + w]
+        face_roi = image[y:y + h, x:x + w]
         face_id = get_or_assign_face_id(face_roi)
 
         if face_id is None:
@@ -238,17 +258,13 @@ def capture_and_process_video(imageString: str) -> None:
 
         detected_face_ids.add(face_id)
 
-        # if the person is already present in facedata
         if face_data[face_id]["time_out"] is not None:
             face_data[face_id]["time_in"] = current_time
             face_data[face_id]["time_out"] = None
             face_data[face_id]["emotions"] = []
 
-        # If it's the first time we see this face, log time_in and store base64 image
         if face_data[face_id]["time_in"] is None:
             face_data[face_id]["time_in"] = current_time
-            # face_data[face_id]["base64_image"] = image_to_base64(face_roi)
-            # log_base64(face_id, face_data[face_id]["base64_image"])  # Log the base64 string
 
         # Analyze face for emotion
         emotion = analyze_face(face_roi)
@@ -257,20 +273,16 @@ def capture_and_process_video(imageString: str) -> None:
             insert_face_emotion(
                 datetime.strptime(current_time, "%Y-%m-%d %H:%M:%S"), face_id, emotion
             )
-            # logging.info(f"Face ID {face_id} detected emotion: {emotion}")
+            logger.info(f"Face ID {face_id} detected emotion: {emotion} at {current_time}")
 
+    # Handle faces that are no longer detected
     for face_id in list(face_data.keys()):
         if face_id not in detected_face_ids:
-
             try:
-
                 face_data[face_id]["time_out"] = current_time
-                time_in = datetime.strptime(
-                    face_data[face_id]["time_in"], "%Y-%m-%d %H:%M:%S"
-                )
-
+                time_in = datetime.strptime(face_data[face_id]["time_in"], "%Y-%m-%d %H:%M:%S")
                 time_out = datetime.strptime(current_time, "%Y-%m-%d %H:%M:%S")
-                duration = (time_out - time_in).total_seconds()  # Duration in seconds
+                duration = (time_out - time_in).total_seconds()
 
                 cumulative_emotions = face_data[face_id]["emotions"]
                 productivity = calculate_productivity(cumulative_emotions)
@@ -284,17 +296,15 @@ def capture_and_process_video(imageString: str) -> None:
                     productivity,
                 )
 
-                # detected_face_ids.remove(face_id)
                 del face_data[face_id]
+                logger.info(f"Logged data for Face ID {face_id} and removed from tracking.")
             except Exception as e:
-                print("error on server side", e)
+                logger.exception(f"Error processing face ID {face_id}: {e}")
 
-    print("face data after", face_data)
-    print("face ids we got", face_ids.keys())
-
+    logger.debug(f"Current face data: {face_data}")
+    logger.debug(f"Tracked face IDs: {list(face_ids.keys())}")
 
 hasIntialised = False
-
 
 @app.post("/process_frame")
 async def process_frame(params: dict = Body(...)):
@@ -304,9 +314,8 @@ async def process_frame(params: dict = Body(...)):
         setup_logging()
         get_face_cascade()
         get_segmentor()
+        init_csv()
         hasIntialised = True
-
-    # return {"processed": params.get("image")}
 
     image = params.get("image")
     prefix1 = "data:image/jpeg;base64,"
@@ -314,34 +323,39 @@ async def process_frame(params: dict = Body(...)):
     prefix3 = "data:image/jpg:base64,"
 
     if image.startswith(prefix1):
-        image = image[len(prefix1) :]
+        image = image[len(prefix1):]
 
     if image.startswith(prefix2):
-        image = image[len(prefix2) :]
+        image = image[len(prefix2):]
 
     if image.startswith(prefix3):
-        image = image[len(prefix3) :]
+        image = image[len(prefix3):]
 
     try:
-        # Start the video capture and processing in a separate thread
-        # thread = threading.Thread(target=capture_and_process_video, args=(image,))
-        # thread.start()
         capture_and_process_video(image)
-
         return {
-            "message": "Video processing started. Check logs for emotion detection results."
+            "message": "Frame processed successfully."
         }
     except Exception as e:
-        logging.error(f"Error starting video feed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to log facial expressions")
-
+        logger.exception("Error processing frame.")
+        raise HTTPException(status_code=500, detail="Failed to process the frame.")
 
 @app.get("/")
 async def read_root():
     return {"message": "Welcome to the FastAPI application!"}
 
+# Middleware to handle exceptions globally
+class ExceptionLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as e:
+            logger.exception(f"Unhandled exception: {e}")
+            raise e
+
+app.add_middleware(ExceptionLoggingMiddleware)
 
 if __name__ == "__main__":
-    # start_time = time.perf_counter()
-
+    setup_logging()
     uvicorn.run(app, host="0.0.0.0", port=8000)
