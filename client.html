@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Testing</title>
+    <style>
+      canvas {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="myvideo" width="720" height="560" autoplay muted></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+    <script>
+      async function sendFrameToAPI(base64Image) {
+        const payload = {
+          image: base64Image,
+        };
+
+        const API_ENDPOINT = "http://localhost:8000/process_frame";
+
+        try {
+          const response = await fetch(API_ENDPOINT, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+          });
+
+          if (response.ok) {
+            console.log("Frame successfully sent!");
+          } else {
+            console.error(
+              "Failed to send frame:",
+              response.status,
+              response.statusText
+            );
+          }
+        } catch (error) {
+          console.error("Error sending frame:", error);
+        }
+      }
+      navigator.mediaDevices
+        .getUserMedia({
+          video: true,
+        })
+        .then((localStream) => {
+          const vid1 = document.getElementById("myvideo");
+          canvas = document.getElementById("canvas");
+          const context = canvas.getContext("2d");
+          vid1.srcObject = localStream;
+
+          // calls the api every two seconds
+          setInterval(async function () {
+            context.drawImage(vid1, 0, 0, canvas.width, canvas.height);
+            const base64Image = canvas.toDataURL("image/jpeg", 0.7);
+
+            // Send the frame to the API
+            await sendFrameToAPI(base64Image);
+          }, 2000);
+        });
+    </script>
+  </body>
+</html>
